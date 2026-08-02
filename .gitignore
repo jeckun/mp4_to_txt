@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+models/
+.pytest_cache/
+
+# Keep directory structure only for runtime/test data folders
+output/*
+!output/.gitkeep
+archiving/*
+!archiving/.gitkeep
+videos/*
+!videos/.gitkeep
+tests/*
+!tests/.gitkeep
