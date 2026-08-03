@@ -12,6 +12,7 @@
 
 - 字幕优先策略：存在可解码字幕流时直接提取字幕内容，避免不必要转写开销。
 - 音频转写回退：无字幕时提取 16kHz 单声道 WAV，再执行本地 ASR。
+- 残留源视频保护：如果源视频仍留在 `videos/`，即使已有同名输出，也会视为上次未完整归档并覆盖重写输出。
 - 进度可观测：转写阶段提供单行进度更新（基于片段时间位置估算百分比）。
 - 运行可追溯：
   - 实时运行日志：`output/_runtime.log`
@@ -23,8 +24,9 @@
 1. 扫描 `videos/` 下所有支持格式的视频。
 2. 探测流信息（字幕流/音频流/时长）。
 3. 执行文本提取：
-   - 字幕可用：直接提取
-   - 字幕不可用：提取音频并转写
+  - 字幕可用：直接提取
+  - 字幕不可用：提取音频并转写
+  - 若检测到同名输出已存在但源视频仍在待处理目录：覆盖已有输出并重跑
 4. 输出结果到 `output/`（保持原目录结构）。
 5. 刷新报告并归档源视频。
 
@@ -48,58 +50,23 @@
 
 ## 安装
 
-无论选择哪种安装方式，目标都是一致的：
-
-- 创建并启用项目虚拟环境
-- 安装 Python 依赖
-- 预下载默认模型（`small`）到 `models/`
-
-完成以上三项后，环境才算完整可用。
-
 ### 方式一：一键安装（推荐）
 
-直接运行：`install.bat`
-
-该脚本会自动完成：
-
-1. 创建 `.venv`
-2. 安装依赖
-3. 预下载 `small` 模型
+运行：`install.bat`
 
 ### 方式二：手动安装
-
-请按以下顺序执行（缺一不可）：
 
 ```bat
 python -m venv .venv
 .venv\Scripts\activate
-python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
-
-set HF_ENDPOINT=https://hf-mirror.com
-set HF_HUB_DISABLE_XET=1
-python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8', download_root='models', local_files_only=False)"
 ```
 
-若网络环境可直连 HuggingFace，可省略 `HF_ENDPOINT` 相关变量，仅保留最后一行模型预下载命令。
-
-### 国内网络建议（可选但推荐）
-
-依赖安装慢时可先设置 pip 镜像（一次配置长期生效）：
+国内网络可配置镜像：
 
 ```bat
 pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
 ```
-
-### 安装完成后自检
-
-建议执行一次 dry-run 验证环境完整性：
-
-```bat
-python mp4_to_txt.py --dry-run
-```
-
-若脚本能正常输出视频流信息且不报模型初始化错误，说明环境已适配完成。
 
 ## 快速开始
 
@@ -134,7 +101,7 @@ python mp4_to_txt.py --videos-dir D:\my_videos --output-dir D:\my_output
 | `--cpu-threads` | CPU 线程数，`0` 表示自动 |
 | `--no-vad` | 关闭 VAD（静音检测） |
 | `--srt` | 同时生成 `.srt` |
-| `--force` | 强制重跑已有输出视频 |
+| `--force` | 显式声明覆盖已有输出；当源视频仍在待处理目录时，脚本默认也会覆盖重跑 |
 | `--dry-run` | 仅探测并打印流信息，不执行处理 |
 | `--verbose` | 输出更详细的运行日志 |
 
@@ -143,6 +110,7 @@ python mp4_to_txt.py --videos-dir D:\my_videos --output-dir D:\my_output
 - 运行期日志实时落盘，异常可在 `output/_runtime.log` 直接定位。
 - 报告按视频粒度持续刷新，中途中断也可保留已完成阶段结果。
 - 音频提取与转写采用子进程隔离策略，降低底层库异常对主流程的影响范围。
+- 若上次中断后出现“源视频仍在 `videos/`、但 `output/` 已有同名文本”的残留状态，脚本会优先重跑并覆盖旧输出，而不是直接跳过。
 
 ## 已知边界
 

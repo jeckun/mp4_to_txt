@@ -109,6 +109,12 @@ def human_duration(seconds: Optional[float]) -> str:
     return f"{s}秒"
 
 
+def describe_exit_code(return_code: int) -> str:
+    if return_code == -1073741819:
+        return f"{return_code}（Windows access violation，常见于底层 C 扩展崩溃）"
+    return str(return_code)
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     base = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
@@ -169,16 +175,16 @@ def find_video_files(videos_dir: Path) -> list[Path]:
     )
 
 
-def probe_streams(video_path: Path) -> tuple[list, list, Optional[float]]:
-    """返回 (字幕流列表, 音频流列表, 视频时长秒数)。"""
+def probe_streams(video_path: Path) -> tuple[list[int], list[int], Optional[float]]:
+    """返回 (字幕流索引列表, 音频流索引列表, 视频时长秒数)。"""
     if av is None:
         raise RuntimeError(
             "缺少 PyAV 依赖，请先运行 install.bat 或执行 pip install -r requirements.txt"
         )
     container = av.open(str(video_path))
     try:
-        subtitles = [s for s in container.streams if s.type == "subtitle"]
-        audios = [s for s in container.streams if s.type == "audio"]
+        subtitles = [int(s.index) for s in container.streams if s.type == "subtitle"]
+        audios = [int(s.index) for s in container.streams if s.type == "audio"]
         duration = container.duration / 1_000_000 if container.duration else None
         return subtitles, audios, duration
     finally:
@@ -210,35 +216,23 @@ def ass_text_to_lines(ass_text: str) -> list[str]:
     return [fallback] if fallback else []
 
 
-def select_stream(container, stream_type: str, preferred_stream=None):
-    """从容器中选择目标流，优先按索引匹配，再按 codec/id 回退。"""
+def select_stream(container, stream_type: str, preferred_stream_index: Optional[int] = None):
+    """从容器中选择目标流，优先按索引匹配。"""
     candidates = [s for s in container.streams if getattr(s, "type", None) == stream_type]
     if not candidates:
         return None
 
-    if preferred_stream is None:
+    if preferred_stream_index is None:
         return candidates[0]
 
-    preferred_index = getattr(preferred_stream, "index", None)
-    preferred_codec = getattr(preferred_stream, "codec_name", None)
-    preferred_id = getattr(preferred_stream, "id", None)
-
     for stream in candidates:
-        if getattr(stream, "index", None) == preferred_index:
-            return stream
-
-    for stream in candidates:
-        if preferred_codec and getattr(stream, "codec_name", None) == preferred_codec:
-            return stream
-
-    for stream in candidates:
-        if preferred_id is not None and getattr(stream, "id", None) == preferred_id:
+        if getattr(stream, "index", None) == preferred_stream_index:
             return stream
 
     return candidates[0]
 
 
-def extract_subtitle_entries(video_path: Path, subtitle_stream) -> list[Segment]:
+def extract_subtitle_entries(video_path: Path, subtitle_stream_index: Optional[int]) -> list[Segment]:
     """解码一条文本字幕流，返回带时间信息的字幕条目。"""
     if av is None:
         raise RuntimeError(
@@ -247,7 +241,7 @@ def extract_subtitle_entries(video_path: Path, subtitle_stream) -> list[Segment]
     entries: list[Segment] = []
     container = av.open(str(video_path))
     try:
-        stream = select_stream(container, "subtitle", subtitle_stream)
+        stream = select_stream(container, "subtitle", subtitle_stream_index)
         if stream is None:
             return entries
         for frame in container.decode(stream):
@@ -332,8 +326,10 @@ def export_audio_to_output(video_path: Path, args: argparse.Namespace, audio_str
     if proc.returncode != 0:
         details = (proc.stderr or proc.stdout or "").strip()
         if details:
-            raise RuntimeError(f"音频提取子进程失败（退出码 {proc.returncode}）：{details}")
-        raise RuntimeError(f"音频提取子进程失败（退出码 {proc.returncode}）")
+            raise RuntimeError(
+                f"音频提取子进程失败（退出码 {describe_exit_code(proc.returncode)}）：{details}"
+            )
+        raise RuntimeError(f"音频提取子进程失败（退出码 {describe_exit_code(proc.returncode)}）")
 
     return wav_path
 
@@ -513,9 +509,9 @@ class Transcriber:
         if return_code != 0:
             if stderr:
                 raise RuntimeError(
-                    f"语音转写子进程失败（退出码 {return_code}）：{stderr}"
+                    f"语音转写子进程失败（退出码 {describe_exit_code(return_code)}）：{stderr}"
                 )
-            raise RuntimeError(f"语音转写子进程失败（退出码 {return_code}）")
+            raise RuntimeError(f"语音转写子进程失败（退出码 {describe_exit_code(return_code)}）")
         return segments, meta
 
 
@@ -576,6 +572,10 @@ def archive_processed_video(video_path: Path, args: argparse.Namespace) -> Path:
     return destination_path
 
 
+def has_existing_output(out_txt: Path, out_srt: Optional[Path]) -> bool:
+    return out_txt.exists() and (out_srt is None or out_srt.exists())
+
+
 def process_video(video_path: Path, args: argparse.Namespace,
                   transcriber: Transcriber) -> VideoResult:
     rel = video_path.relative_to(args.videos_dir)
@@ -585,10 +585,12 @@ def process_video(video_path: Path, args: argparse.Namespace,
 
     result = VideoResult(video=video_path, rel=rel, output_txt=out_txt, output_srt=out_srt)
 
-    if out_txt.exists() and not args.force and (out_srt is None or out_srt.exists()):
-        result.status = "skipped"
-        result.method = "-"
-        return result
+    existing_output = has_existing_output(out_txt, out_srt)
+    if existing_output:
+        if args.force:
+            print("  [状态] 已启用 --force，正在覆盖已有输出...")
+        else:
+            print("  [状态] 检测到源视频仍在待处理目录，已有输出将视为未完成结果并覆盖重写...")
 
     try:
         print(f"  [状态] 正在读取视频流信息: {video_path.name}")
@@ -604,8 +606,8 @@ def process_video(video_path: Path, args: argparse.Namespace,
         if subtitles:
             print("  [状态] 检测到字幕流，正在读取字幕内容...")
             task_start = time.time()
-            for stream in subtitles:
-                segments = extract_subtitle_entries(video_path, stream)
+            for subtitle_stream_index in subtitles:
+                segments = extract_subtitle_entries(video_path, subtitle_stream_index)
                 if segments:
                     method = "subtitle"
                     break
@@ -621,7 +623,7 @@ def process_video(video_path: Path, args: argparse.Namespace,
             method = "stt"
             print(f"  [状态] 正在提取音频（时长 {human_duration(duration)}）...")
             task_start = time.time()
-            audio_stream_index = getattr(audios[0], "index", None)
+            audio_stream_index = audios[0]
             wav_path = export_audio_to_output(video_path, args, audio_stream_index)
             audio_extract_seconds = time.time() - task_start
             result.task_seconds["音频提取"] = audio_extract_seconds
@@ -744,6 +746,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("音频提取子进程参数不完整", file=sys.stderr)
             return 2
         try:
+            faulthandler.enable()
             extract_audio_to_wav(args._worker_video, args._worker_stream_index, args._worker_wav)
             return 0
         except Exception:
