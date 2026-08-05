@@ -5,7 +5,8 @@
 - 自动递归扫描 `videos/` 下的视频文件
 - 优先提取内嵌文本字幕
 - 无可用字幕时自动回退到本地语音转写（faster-whisper）
-- 输出标准文本与可选 SRT
+- 转写阶段先输出临时文本，归档时再转正
+- 可选输出 SRT
 - 在长任务场景中提供实时日志、转写进度与阶段性报告
 
 ## 核心能力
@@ -18,6 +19,8 @@
   - 实时运行日志：`output/_runtime.log`
   - 阶段性处理报告：`output/_processing_report.txt`（每个视频处理后刷新）
 - 自动归档：处理成功后，源视频按相对路径移动到项目根目录 `archiving/`。
+- 临时转正：转写结果先写入 `output/*.tmp`，归档时改名为 `.txt` 并移动到 `archiving/` 与视频同路径。
+- 中间文件清理：用于转写的 `wav` 音频中间文件在转写完成后自动删除。
 
 ## 处理流程
 
@@ -27,8 +30,9 @@
   - 字幕可用：直接提取
   - 字幕不可用：提取音频并转写
   - 若检测到同名输出已存在但源视频仍在待处理目录：覆盖已有输出并重跑
-4. 输出结果到 `output/`（保持原目录结构）。
-5. 刷新报告并归档源视频。
+4. 在 `output/` 生成临时文本（`.tmp`）与可选 `srt`（保持原目录结构）。
+5. 归档阶段将视频移入 `archiving/`，同时把对应 `.tmp` 改名为 `.txt` 并移入同路径。
+6. 刷新报告并清理音频中间文件。
 
 ## 支持的输入格式
 
@@ -36,7 +40,8 @@
 
 ## 输出规范
 
-- 文本输出：`output/<原相对路径>/<视频同名>.txt`
+- 临时文本：`output/<原相对路径>/<视频同名>.tmp`
+- 正式文本（归档后）：`archiving/<原相对路径>/<视频同名>.txt`
 - 可选字幕输出：`output/<原相对路径>/<视频同名>.srt`
 - 运行日志：`output/_runtime.log`
 - 处理报告：`output/_processing_report.txt`
@@ -74,6 +79,12 @@ pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
 python mp4_to_txt.py
 ```
 
+持续监控并自动处理：
+
+```bat
+python watch_videos.py --run-existing
+```
+
 在 VS Code 中建议选择解释器：`.venv\Scripts\python.exe`。
 
 ## 常用命令
@@ -84,6 +95,7 @@ python mp4_to_txt.py --model large-v3 --language zh --srt
 python mp4_to_txt.py --dry-run
 python mp4_to_txt.py --force
 python mp4_to_txt.py --videos-dir D:\my_videos --output-dir D:\my_output
+python watch_videos.py --run-existing --model small --language zh
 ```
 
 ## 参数说明
@@ -104,6 +116,19 @@ python mp4_to_txt.py --videos-dir D:\my_videos --output-dir D:\my_output
 | `--force` | 显式声明覆盖已有输出；当源视频仍在待处理目录时，脚本默认也会覆盖重跑 |
 | `--dry-run` | 仅探测并打印流信息，不执行处理 |
 | `--verbose` | 输出更详细的运行日志 |
+
+`watch_videos.py` 额外参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--videos-dir` | 监控目录，默认 `./videos` |
+| `--processor` | 处理脚本路径，默认 `./mp4_to_txt.py` |
+| `--poll-interval` | 轮询间隔秒数，默认 `2` |
+| `--stable-seconds` | 文件稳定判定秒数，默认 `3` |
+| `--run-existing` | 启动后连同当前已存在视频一并处理 |
+
+说明：`watch_videos.py` 会把它不认识的参数透传给 `mp4_to_txt.py`，例如 `--model`、`--language`、`--srt`。
+说明：如果在 `mp4_to_txt.py` 正在执行期间又放入了新视频，监控器会在本轮结束后自动识别并触发下一轮处理，无需人工干预。
 
 ## 稳定性与可观测性说明
 

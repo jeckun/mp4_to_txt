@@ -7,7 +7,8 @@
 2. 用 PyAV 探测视频流：
    - 有可解码文本字幕时，直接抽取字幕文本；
    - 无字幕时，提取音频为 16 kHz 单声道 WAV，交给 faster-whisper 语音转文字；
-3. 在 output 下按原目录结构生成与视频同名的 .txt，可选生成 .srt。
+3. 在 output 下按原目录结构先生成与视频同名的 .tmp 临时文本，可选生成 .srt。
+4. 处理成功后，将视频与文本一起归档到 archiving（文本在归档时改名为 .txt）。
 
 示例：
     python mp4_to_txt.py
@@ -520,6 +521,17 @@ def write_text_file(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
+def remove_file_if_exists(path: Optional[Path], label: str) -> None:
+    if path is None:
+        return
+    try:
+        if path.exists():
+            path.unlink()
+            print(f"  [状态] 已清理{label}: {path}")
+    except Exception as exc:
+        print(f"  [警告] 清理{label}失败: {path} ({exc})")
+
+
 def format_srt_time(seconds: float) -> str:
     seconds = max(0.0, float(seconds))
     h, rem = divmod(int(seconds), 3600)
@@ -557,40 +569,43 @@ def archive_root_dir(args: argparse.Namespace) -> Path:
     return args.videos_dir.parent / "archiving"
 
 
-def archive_processed_video(video_path: Path, args: argparse.Namespace) -> Path:
-    """把成功处理的视频文件按相对路径移动到 archiving 目录。"""
+def archive_processed_artifacts(
+    video_path: Path,
+    temp_txt_path: Path,
+    args: argparse.Namespace,
+) -> tuple[Path, Path]:
+    """把视频与临时文本一并归档；文本在归档时改名为 .txt。"""
     rel = video_path.relative_to(args.videos_dir)
     archive_root = archive_root_dir(args)
     archive_root.mkdir(parents=True, exist_ok=True)
-    destination_path = archive_root / rel
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_video_path = archive_root / rel
+    destination_video_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_txt_path = destination_video_path.with_suffix(".txt")
+
+    if not temp_txt_path.exists():
+        raise FileNotFoundError(f"归档前找不到临时文本: {temp_txt_path}")
+
+    if destination_txt_path.exists():
+        destination_txt_path.unlink()
+    temp_txt_path.replace(destination_txt_path)
+
     if not video_path.exists():
-        if destination_path.exists():
-            return destination_path
+        if destination_video_path.exists():
+            return destination_video_path, destination_txt_path
         raise FileNotFoundError(f"归档前找不到源文件: {video_path}")
-    video_path.replace(destination_path)
-    return destination_path
-
-
-def has_existing_output(out_txt: Path, out_srt: Optional[Path]) -> bool:
-    return out_txt.exists() and (out_srt is None or out_srt.exists())
+    video_path.replace(destination_video_path)
+    return destination_video_path, destination_txt_path
 
 
 def process_video(video_path: Path, args: argparse.Namespace,
                   transcriber: Transcriber) -> VideoResult:
     rel = video_path.relative_to(args.videos_dir)
     out_dir = args.output_dir / rel.parent
-    out_txt = out_dir / f"{video_path.stem}.txt"
+    out_txt_tmp = out_dir / f"{video_path.stem}.tmp"
     out_srt = out_dir / f"{video_path.stem}.srt" if args.srt else None
+    archived_txt = archive_root_dir(args) / rel.parent / f"{video_path.stem}.txt"
 
-    result = VideoResult(video=video_path, rel=rel, output_txt=out_txt, output_srt=out_srt)
-
-    existing_output = has_existing_output(out_txt, out_srt)
-    if existing_output:
-        if args.force:
-            print("  [状态] 已启用 --force，正在覆盖已有输出...")
-        else:
-            print("  [状态] 检测到源视频仍在待处理目录，已有输出将视为未完成结果并覆盖重写...")
+    result = VideoResult(video=video_path, rel=rel, output_txt=archived_txt, output_srt=out_srt)
 
     try:
         print(f"  [状态] 正在读取视频流信息: {video_path.name}")
@@ -628,20 +643,23 @@ def process_video(video_path: Path, args: argparse.Namespace,
             audio_extract_seconds = time.time() - task_start
             result.task_seconds["音频提取"] = audio_extract_seconds
             print(f"  [状态] 音频提取完成（耗时 {human_duration(audio_extract_seconds)}）")
-            print("  [状态] 音频已提取，正在转写...")
-            task_start = time.time()
-            segments, meta = transcriber.transcribe_in_subprocess(
-                wav_path,
-                media_duration_seconds=duration,
-            )
-            transcribe_seconds = time.time() - task_start
-            result.task_seconds["语音转写"] = transcribe_seconds
-            print(f"  [状态] 语音转写完成（耗时 {human_duration(transcribe_seconds)}）")
-            if args.verbose:
-                lang = meta.get("language", "?")
-                prob = meta.get("language_probability")
-                prob_text = f" ({prob:.2%})" if prob is not None else ""
-                print(f"  识别语言: {lang}{prob_text}")
+            try:
+                print("  [状态] 音频已提取，正在转写...")
+                task_start = time.time()
+                segments, meta = transcriber.transcribe_in_subprocess(
+                    wav_path,
+                    media_duration_seconds=duration,
+                )
+                transcribe_seconds = time.time() - task_start
+                result.task_seconds["语音转写"] = transcribe_seconds
+                print(f"  [状态] 语音转写完成（耗时 {human_duration(transcribe_seconds)}）")
+                if args.verbose:
+                    lang = meta.get("language", "?")
+                    prob = meta.get("language_probability")
+                    prob_text = f" ({prob:.2%})" if prob is not None else ""
+                    print(f"  识别语言: {lang}{prob_text}")
+            finally:
+                remove_file_if_exists(wav_path, "音频临时文件")
 
         result.segments = len(segments)
         result.method = method
@@ -650,12 +668,12 @@ def process_video(video_path: Path, args: argparse.Namespace,
         if not normalized_text:
             raise RuntimeError("没有提取到任何文字（可能是无声视频或纯图片字幕）")
 
-        print("  [状态] 正在写入输出文本...")
+        print("  [状态] 正在写入临时文本...")
         task_start = time.time()
-        write_text_file(out_txt, normalized_text + "\n")
+        write_text_file(out_txt_tmp, normalized_text + "\n")
         text_write_seconds = time.time() - task_start
-        result.task_seconds["文本写入"] = text_write_seconds
-        print(f"  [状态] 文本写入完成（耗时 {human_duration(text_write_seconds)}）")
+        result.task_seconds["临时文本写入"] = text_write_seconds
+        print(f"  [状态] 临时文本写入完成（耗时 {human_duration(text_write_seconds)}）")
         if args.srt:
             task_start = time.time()
             srt_content = build_srt(segments)
@@ -665,11 +683,16 @@ def process_video(video_path: Path, args: argparse.Namespace,
             result.task_seconds["SRT写入"] = srt_write_seconds
             print(f"  [状态] SRT 写入完成（耗时 {human_duration(srt_write_seconds)}）")
         task_start = time.time()
-        archived_path = archive_processed_video(video_path, args)
+        archived_video_path, archived_txt_path = archive_processed_artifacts(
+            video_path,
+            out_txt_tmp,
+            args,
+        )
         archive_seconds = time.time() - task_start
-        result.task_seconds["归档目录"] = archive_seconds
+        result.task_seconds["归档"] = archive_seconds
+        result.output_txt = archived_txt_path
         print(f"  [状态] 归档完成（耗时 {human_duration(archive_seconds)}）")
-        print(f"  [状态] 处理完成，已归档到 {archived_path}")
+        print(f"  [状态] 处理完成，已归档到 {archived_video_path}")
         result.status = "ok"
         return result
     except Exception as exc:
