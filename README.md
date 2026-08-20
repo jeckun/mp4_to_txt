@@ -50,20 +50,32 @@
 ## 环境要求
 
 - Python 3.10+
-- Windows（当前项目脚本按 Windows 使用习惯提供）
+- Windows / macOS
 - 建议使用虚拟环境 `.venv`
 
 ## 安装
 
 ### 方式一：一键安装（推荐）
 
-运行：`install.bat`
+Windows：运行 `install.bat`
+
+macOS：运行 `./install.sh`
 
 ### 方式二：手动安装
+
+Windows：
 
 ```bat
 python -m venv .venv
 .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+macOS：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -75,17 +87,33 @@ pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
 
 ## 快速开始
 
+Windows：
+
 ```bat
 python mp4_to_txt.py
 ```
 
+macOS：
+
+```bash
+python3 mp4_to_txt.py
+```
+
 持续监控并自动处理：
+
+Windows：
 
 ```bat
 python watch_videos.py --run-existing
 ```
 
-在 VS Code 中建议选择解释器：`.venv\Scripts\python.exe`。
+macOS：
+
+```bash
+./run_watch_videos.sh
+```
+
+在 VS Code 中建议选择解释器：Windows 用 `.venv\Scripts\python.exe`，macOS 用 `.venv/bin/python`。
 
 ## 常用命令
 
